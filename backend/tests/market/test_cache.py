@@ -15,26 +15,32 @@ class TestPriceCache:
         assert cache.get("AAPL") == update
 
     def test_first_update_is_flat(self):
-        """Test that the first update has flat direction."""
+        """Test that the first update has flat tick_direction."""
         cache = PriceCache()
         update = cache.update("AAPL", 190.50)
-        assert update.direction == "flat"
+        assert update.tick_direction == "flat"
         assert update.previous_price == 190.50
 
+    def test_first_update_open_price_defaults_to_price(self):
+        """On first write, open_price defaults to price when not given."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.50)
+        assert update.open_price == 190.50
+
     def test_direction_up(self):
-        """Test price update with upward direction."""
+        """Test price update with upward tick_direction."""
         cache = PriceCache()
         cache.update("AAPL", 190.00)
         update = cache.update("AAPL", 191.00)
-        assert update.direction == "up"
+        assert update.tick_direction == "up"
         assert update.change == 1.00
 
     def test_direction_down(self):
-        """Test price update with downward direction."""
+        """Test price update with downward tick_direction."""
         cache = PriceCache()
         cache.update("AAPL", 190.00)
         update = cache.update("AAPL", 189.00)
-        assert update.direction == "down"
+        assert update.tick_direction == "down"
         assert update.change == -1.00
 
     def test_remove(self):
@@ -101,3 +107,29 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+    def test_explicit_open_price(self):
+        """Test that an explicit open_price is stored as given."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.50, open_price=180.00)
+        assert update.open_price == 180.00
+
+    def test_open_price_persists_across_updates(self):
+        """open_price should stay fixed for the session unless explicitly changed."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, open_price=180.00)
+        update = cache.update("AAPL", 195.00)  # no open_price given
+        assert update.open_price == 180.00
+
+    def test_open_price_can_be_updated_explicitly(self):
+        """A source may explicitly move the baseline (e.g. Massive's prev_day.close)."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, open_price=180.00)
+        update = cache.update("AAPL", 195.00, open_price=185.00)
+        assert update.open_price == 185.00
+
+    def test_open_price_rounded(self):
+        """Test that open_price is rounded to 2 decimal places."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, open_price=180.126)
+        assert update.open_price == 180.13

@@ -11,8 +11,8 @@ from .models import PriceUpdate
 class PriceCache:
     """Thread-safe in-memory cache of the latest price for each ticker.
 
-    Writers: SimulatorDataSource or MassiveDataSource (one at a time).
-    Readers: SSE streaming endpoint, portfolio valuation, trade execution.
+    Writers: SimulatorDataSource, AnchoredSimulatorDataSource, or MassiveDataSource
+    (one at a time). Readers: SSE streaming endpoint, portfolio valuation, trade execution.
     """
 
     def __init__(self) -> None:
@@ -20,21 +20,39 @@ class PriceCache:
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
 
-    def update(self, ticker: str, price: float, timestamp: float | None = None) -> PriceUpdate:
+    def update(
+        self,
+        ticker: str,
+        price: float,
+        timestamp: float | None = None,
+        open_price: float | None = None,
+    ) -> PriceUpdate:
         """Record a new price for a ticker. Returns the created PriceUpdate.
 
-        Automatically computes direction and change from the previous price.
-        If this is the first update for the ticker, previous_price == price (direction='flat').
+        Automatically computes direction and change from the previous tick.
+        If this is the first update for the ticker, previous_price == price (tick_direction='flat').
+
+        `open_price` is the session baseline used for the daily change column. When
+        omitted, the ticker keeps whatever open_price it already had; on the very
+        first write it defaults to `price`.
         """
         with self._lock:
             ts = timestamp or time.time()
             prev = self._prices.get(ticker)
             previous_price = prev.price if prev else price
 
+            if open_price is not None:
+                resolved_open = open_price
+            elif prev is not None:
+                resolved_open = prev.open_price
+            else:
+                resolved_open = price
+
             update = PriceUpdate(
                 ticker=ticker,
                 price=round(price, 2),
                 previous_price=round(previous_price, 2),
+                open_price=round(resolved_open, 2),
                 timestamp=ts,
             )
             self._prices[ticker] = update

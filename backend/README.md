@@ -6,13 +6,15 @@ FastAPI backend for the FinAlly AI Trading Workstation.
 
 - `app/` - Application code
   - `market/` - Market data subsystem
-    - `models.py` - PriceUpdate dataclass
+    - `models.py` - PriceUpdate/PricePoint/SourceStatus dataclasses
     - `cache.py` - Thread-safe price cache
     - `interface.py` - MarketDataSource abstract interface
+    - `capabilities.py` - Massive API entitlement probe
     - `simulator.py` - GBM-based market simulator
-    - `massive_client.py` - Massive/Polygon.io API client
-    - `factory.py` - Data source factory
-    - `stream.py` - SSE streaming endpoint
+    - `anchored.py` - Simulator seeded from real Massive closing prices (free-tier keys)
+    - `massive_client.py` - Massive/Polygon.io API client (real-time tiers)
+    - `factory.py` - Async, capability-driven data source factory
+    - `stream.py` - SSE streaming endpoint (with heartbeat)
     - `seed_prices.py` - Default ticker prices and parameters
 
 - `tests/` - Unit and integration tests

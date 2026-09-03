@@ -79,10 +79,10 @@ def build_table(
             continue
 
         # Direction styling
-        if update.direction == "up":
+        if update.tick_direction == "up":
             color = "green"
             arrow = "[bold green]\u25b2[/]"
-        elif update.direction == "down":
+        elif update.tick_direction == "down":
             color = "red"
             arrow = "[bold red]\u25bc[/]"
         else:
@@ -248,8 +248,8 @@ async def run() -> None:
 
                     # Log notable moves
                     if abs(update.change_percent) > 1.0:
-                        direction = "\u25b2" if update.direction == "up" else "\u25bc"
-                        color = "green" if update.direction == "up" else "red"
+                        direction = "\u25b2" if update.tick_direction == "up" else "\u25bc"
+                        color = "green" if update.tick_direction == "up" else "red"
                         timestamp = time.strftime("%H:%M:%S")
                         events.appendleft(
                             f"[bright_black]{timestamp}[/]  "

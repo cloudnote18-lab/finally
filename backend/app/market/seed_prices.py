@@ -1,17 +1,24 @@
-"""Seed prices and per-ticker parameters for the market simulator."""
+"""Seed prices and per-ticker parameters for the market simulator.
 
-# Realistic starting prices for the default watchlist (as of project creation)
+These are the no-key fallback only. When a Massive API key is available,
+AnchoredSimulatorDataSource replaces these levels with real closing prices —
+see planning/MARKET_INTERFACE.md. Refreshed to real 2026-09-02 closes so the
+no-key demo does not show implausible levels (e.g. NVDA and NFLX are badly
+stale after their 2024 splits).
+"""
+
+# Starting prices for the default watchlist, sourced from real 2026-09-02 closes.
 SEED_PRICES: dict[str, float] = {
-    "AAPL": 190.00,
-    "GOOGL": 175.00,
-    "MSFT": 420.00,
-    "AMZN": 185.00,
-    "TSLA": 250.00,
-    "NVDA": 800.00,
-    "META": 500.00,
-    "JPM": 195.00,
-    "V": 280.00,
-    "NFLX": 600.00,
+    "AAPL": 324.96,
+    "GOOGL": 337.12,
+    "MSFT": 496.82,
+    "AMZN": 254.98,
+    "TSLA": 357.01,
+    "NVDA": 224.41,
+    "META": 592.85,
+    "JPM": 356.22,
+    "V": 378.40,
+    "NFLX": 82.73,
 }
 
 # Per-ticker GBM parameters

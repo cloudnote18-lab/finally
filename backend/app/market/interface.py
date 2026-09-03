@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from .models import PricePoint, SourceStatus
+
 
 class MarketDataSource(ABC):
     """Contract for market data providers.
@@ -13,7 +15,7 @@ class MarketDataSource(ABC):
     it reads from the cache.
 
     Lifecycle:
-        source = create_market_data_source(cache)
+        source = await create_market_data_source(cache)
         await source.start(["AAPL", "GOOGL", ...])
         # ... app runs ...
         await source.add_ticker("TSLA")
@@ -55,3 +57,15 @@ class MarketDataSource(ABC):
     @abstractmethod
     def get_tickers(self) -> list[str]:
         """Return the current list of actively tracked tickers."""
+
+    @abstractmethod
+    def describe(self) -> SourceStatus:
+        """Introspection for GET /api/health. Must never raise."""
+
+    async def get_history(self, ticker: str, points: int = 120) -> list[PricePoint]:
+        """Historical series for the chart's first paint.
+
+        Default implementation returns [] — the frontend then accumulates from
+        SSE. Sources with real or synthesized history override this.
+        """
+        return []

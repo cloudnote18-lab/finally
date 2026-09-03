@@ -1,17 +1,29 @@
-"""Massive (Polygon.io) API client for real market data."""
+"""Massive (Polygon.io) API client for real market data.
+
+Only usable by keys entitled to real-time snapshots (Advanced tier or above,
+$199/mo). Lower tiers authenticate but get NOT_AUTHORIZED on every snapshot
+call — factory.py probes entitlement once at startup and routes those keys to
+AnchoredSimulatorDataSource instead. See planning/MASSIVE_API.md.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 
+import urllib3.exceptions
 from massive import RESTClient
+from massive.exceptions import AuthError, BadResponse
 from massive.rest.models import SnapshotMarketType
 
 from .cache import PriceCache
 from .interface import MarketDataSource
+from .models import PricePoint, SourceStatus, epoch_to_iso
 
 logger = logging.getLogger(__name__)
+
+NANOSECONDS_PER_SECOND = 1e9
 
 
 class MassiveDataSource(MarketDataSource):
@@ -20,27 +32,31 @@ class MassiveDataSource(MarketDataSource):
     Polls GET /v2/snapshot/locale/us/markets/stocks/tickers for all watched
     tickers in a single API call, then writes results to the PriceCache.
 
-    Rate limits:
-      - Free tier: 5 req/min → poll every 15s (default)
-      - Paid tiers: higher limits → poll every 2-5s
+    `retries=0` on the client deliberately: the SDK's default retry/backoff is
+    entirely inside the same rate-limit window, so a retry on 429 is guaranteed
+    to fail too — it just burns budget. Poll-level backoff (the interval itself)
+    is what matters.
     """
 
     def __init__(
         self,
         api_key: str,
         price_cache: PriceCache,
-        poll_interval: float = 15.0,
+        poll_interval: float = 5.0,
     ) -> None:
         self._api_key = api_key
         self._cache = price_cache
         self._interval = poll_interval
         self._tickers: list[str] = []
+        self._unknown_tickers: set[str] = set()
         self._task: asyncio.Task | None = None
         self._client: RESTClient | None = None
+        self._live = False
+        self._last_error: str | None = None
 
     async def start(self, tickers: list[str]) -> None:
-        self._client = RESTClient(api_key=self._api_key)
-        self._tickers = list(tickers)
+        self._client = RESTClient(api_key=self._api_key, retries=0)
+        self._tickers = [t.upper().strip() for t in tickers]
 
         # Do an immediate first poll so the cache has data right away
         await self._poll_once()
@@ -72,11 +88,41 @@ class MassiveDataSource(MarketDataSource):
     async def remove_ticker(self, ticker: str) -> None:
         ticker = ticker.upper().strip()
         self._tickers = [t for t in self._tickers if t != ticker]
+        self._unknown_tickers.discard(ticker)
         self._cache.remove(ticker)
         logger.info("Massive: removed ticker %s", ticker)
 
     def get_tickers(self) -> list[str]:
         return list(self._tickers)
+
+    def describe(self) -> SourceStatus:
+        detail = self._last_error or "real-time snapshots"
+        if self._unknown_tickers:
+            detail += f"; not returned by last poll: {', '.join(sorted(self._unknown_tickers))}"
+        return SourceStatus(
+            name="massive",
+            live=self._live,
+            detail=detail,
+            tickers=len(self._tickers),
+            cache_populated=len(self._cache) > 0,
+        )
+
+    async def get_history(self, ticker: str, points: int = 120) -> list[PricePoint]:
+        """Real intraday minute bars for the current session (paid-tier only)."""
+        if not self._client:
+            return []
+        try:
+            bars = await asyncio.to_thread(
+                self._fetch_today_minute_bars, ticker, points
+            )
+        except Exception as e:
+            logger.warning("Massive get_history failed for %s: %s", ticker, e)
+            return []
+        return [PricePoint(epoch_to_iso(bar.timestamp / 1000), bar.close) for bar in bars[-points:]]
+
+    def _fetch_today_minute_bars(self, ticker: str, points: int) -> list:
+        today = datetime.date.today().isoformat()
+        return self._client.get_aggs(ticker, 1, "minute", today, today, limit=max(points, 1))
 
     # --- Internal ---
 
@@ -95,30 +141,65 @@ class MassiveDataSource(MarketDataSource):
             # The Massive RESTClient is synchronous — run in a thread to
             # avoid blocking the event loop.
             snapshots = await asyncio.to_thread(self._fetch_snapshots)
-            processed = 0
-            for snap in snapshots:
-                try:
-                    price = snap.last_trade.price
-                    # Massive timestamps are Unix milliseconds → convert to seconds
-                    timestamp = snap.last_trade.timestamp / 1000.0
-                    self._cache.update(
-                        ticker=snap.ticker,
-                        price=price,
-                        timestamp=timestamp,
-                    )
-                    processed += 1
-                except (AttributeError, TypeError) as e:
-                    logger.warning(
-                        "Skipping snapshot for %s: %s",
-                        getattr(snap, "ticker", "???"),
-                        e,
-                    )
-            logger.debug("Massive poll: updated %d/%d tickers", processed, len(self._tickers))
-
+        except AuthError as e:
+            self._live = False
+            self._last_error = f"auth error: {e}"
+            logger.error("Massive poll failed (auth): %s", e)
+            return
+        except urllib3.exceptions.MaxRetryError as e:
+            # Rate limited or unreachable. Do not retry within this cycle — the
+            # next scheduled poll is the backoff.
+            self._live = False
+            self._last_error = "rate limited or unreachable"
+            logger.warning("Massive poll rate-limited/unreachable: %s", e)
+            return
+        except BadResponse as e:
+            self._live = False
+            self._last_error = str(e)
+            logger.error("Massive poll failed (bad response): %s", e)
+            return
         except Exception as e:
+            self._live = False
+            self._last_error = str(e)
             logger.error("Massive poll failed: %s", e)
-            # Don't re-raise — the loop will retry on the next interval.
-            # Common failures: 401 (bad key), 429 (rate limit), network errors.
+            return
+
+        processed = 0
+        seen: set[str] = set()
+        for snap in snapshots:
+            ticker = getattr(snap, "ticker", None)
+            if ticker:
+                seen.add(ticker)
+            try:
+                last_trade = snap.last_trade
+                if last_trade is None:
+                    raise AttributeError("snapshot has no last_trade")
+                price = last_trade.price
+                # Massive snapshot timestamps are Unix NANOSECONDS on sip_timestamp
+                # (not `timestamp`, and not milliseconds — see planning/MASSIVE_API.md §6).
+                timestamp = last_trade.sip_timestamp / NANOSECONDS_PER_SECOND
+                open_price = snap.prev_day.close if snap.prev_day else None
+                self._cache.update(
+                    ticker=ticker,
+                    price=price,
+                    timestamp=timestamp,
+                    open_price=open_price,
+                )
+                processed += 1
+            except (AttributeError, TypeError) as e:
+                logger.warning(
+                    "Skipping snapshot for %s: %s",
+                    ticker or "???",
+                    e,
+                )
+
+        # Tickers we asked for but that never appeared in the response —
+        # surfaced via describe() rather than vanishing silently.
+        self._unknown_tickers = {t for t in self._tickers if t not in seen}
+        self._live = processed > 0
+        if processed:
+            self._last_error = None
+        logger.debug("Massive poll: updated %d/%d tickers", processed, len(self._tickers))
 
     def _fetch_snapshots(self) -> list:
         """Synchronous call to the Massive REST API. Runs in a thread."""

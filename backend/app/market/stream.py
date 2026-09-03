@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Request
@@ -15,6 +16,12 @@ from .cache import PriceCache
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stream", tags=["streaming"])
+
+# How long the stream may stay silent before sending an SSE comment ping.
+# Matters most in Massive mode: a 15s poll interval (free tier) or a closed
+# market can otherwise leave the connection silent long enough for a proxy or
+# a laptop sleep to drop it without either side noticing.
+HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 def create_stream_router(price_cache: PriceCache) -> APIRouter:
@@ -52,16 +59,22 @@ async def _generate_events(
     price_cache: PriceCache,
     request: Request,
     interval: float = 0.5,
+    heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE-formatted price events.
 
-    Sends all prices every `interval` seconds. Stops when the client
-    disconnects (detected via request.is_disconnected()).
+    Sends the full price map whenever the cache version changes (deliberately
+    not a delta protocol — at 10-50 tickers the payload is a couple of KB, and
+    a delta would need reconnection-resync logic for no measurable gain).
+    Sends a ": ping" comment if nothing has changed for `heartbeat_interval`
+    seconds, so proxies and idle connections don't silently die. Stops when
+    the client disconnects (detected via request.is_disconnected()).
     """
     # Tell the client to retry after 1 second if the connection drops
     yield "retry: 1000\n\n"
 
     last_version = -1
+    last_sent = time.monotonic()
     client_ip = request.client.host if request.client else "unknown"
     logger.info("SSE client connected: %s", client_ip)
 
@@ -81,6 +94,10 @@ async def _generate_events(
                     data = {ticker: update.to_dict() for ticker, update in prices.items()}
                     payload = json.dumps(data)
                     yield f"data: {payload}\n\n"
+                    last_sent = time.monotonic()
+            elif time.monotonic() - last_sent > heartbeat_interval:
+                yield ": ping\n\n"  # SSE comment — ignored by EventSource, keeps the pipe alive
+                last_sent = time.monotonic()
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
